@@ -1,7 +1,8 @@
-// macropad.apk をパスワードで暗号化して macropad.apk.enc を生成する。
+// macropad.apk をパスワードで暗号化して macropad.apk.enc と macropad.apk.check.json を生成する。
 // 使い方: node encrypt-apk.mjs [入力APK] [出力ファイル]
-// 形式: "MPENC1"(6) | iterations(4, BE) | salt(16) | iv(12) | ciphertext+tag
-// index.html の復号処理と形式を合わせること。
+// .enc 形式: "MPENC1"(6) | iterations(4, BE) | salt(16) | iv(12) | ciphertext+tag
+// .check.json: 同じ salt/鍵で空データを暗号化した認証タグ。ページが本体取得前にパスワードを確認するために使う。
+// 2ファイルは必ず同時に生成・コミットすること。index.html の復号処理と形式を合わせること。
 import { readFileSync, writeFileSync } from "node:fs";
 import { randomBytes, pbkdf2Sync, createCipheriv } from "node:crypto";
 import readline from "node:readline";
@@ -9,6 +10,7 @@ import readline from "node:readline";
 const ITERATIONS = 600000;
 const input = process.argv[2] ?? "macropad.apk";
 const output = process.argv[3] ?? "macropad.apk.enc";
+const checkOutput = output.replace(/\.enc$/, "") + ".check.json";
 
 function askHidden(query) {
   return new Promise((resolve) => {
@@ -49,5 +51,19 @@ const header = Buffer.alloc(10);
 header.write("MPENC1", 0, "ascii");
 header.writeUInt32BE(ITERATIONS, 6);
 
-writeFileSync(output, Buffer.concat([header, salt, iv, encrypted]));
-console.log(`${output} を生成しました (${plain.length} bytes -> ${10 + 16 + 12 + encrypted.length} bytes)`);
+const encBytes = Buffer.concat([header, salt, iv, encrypted]);
+writeFileSync(output, encBytes);
+
+const checkIv = randomBytes(12);
+const checkCipher = createCipheriv("aes-256-gcm", key, checkIv);
+checkCipher.final();
+writeFileSync(checkOutput, JSON.stringify({
+  iterations: ITERATIONS,
+  salt: salt.toString("base64"),
+  checkIv: checkIv.toString("base64"),
+  check: checkCipher.getAuthTag().toString("base64"),
+  size: encBytes.length,
+}, null, 2) + "\n");
+
+console.log(`${output} を生成しました (${plain.length} bytes -> ${encBytes.length} bytes)`);
+console.log(`${checkOutput} を生成しました`);

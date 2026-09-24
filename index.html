@@ -38,8 +38,9 @@
   </div>
 
   <script>
-    // macropad.apk.enc の形式は encrypt-apk.mjs を参照
+    // macropad.apk.enc / macropad.apk.check.json の形式は encrypt-apk.mjs を参照
     const ENC_FILE = "macropad.apk.enc";
+    const CHECK_FILE = "macropad.apk.check.json";
     const APK_NAME = "macropad.apk";
     const MAGIC = "MPENC1";
 
@@ -54,27 +55,49 @@
       statusEl.className = isError ? "error" : "";
     }
 
-    async function decrypt(buf, password) {
+    function fromBase64(s) {
+      return Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+    }
+
+    function sameBytes(a, b) {
+      return a.length === b.length && a.every((v, i) => v === b[i]);
+    }
+
+    // 本体を取得する前に確認用ファイルでパスワードを検証し、正しければ鍵を返す
+    async function deriveCheckedKey(check, password) {
+      const baseKey = await crypto.subtle.importKey(
+        "raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveKey"]);
+      const key = await crypto.subtle.deriveKey(
+        { name: "PBKDF2", salt: fromBase64(check.salt), iterations: check.iterations, hash: "SHA-256" },
+        baseKey, { name: "AES-GCM", length: 256 }, false, ["decrypt"]);
+      try {
+        await crypto.subtle.decrypt(
+          { name: "AES-GCM", iv: fromBase64(check.checkIv) }, key, fromBase64(check.check));
+      } catch (err) {
+        // AES-GCM はパスワード違いを認証エラー (OperationError) として返す
+        if (err.name === "OperationError") throw new Error("パスワードが違います。");
+        throw err;
+      }
+      return key;
+    }
+
+    async function decrypt(buf, key, check) {
       const bytes = new Uint8Array(buf);
       if (new TextDecoder().decode(bytes.slice(0, 6)) !== MAGIC) {
         throw new Error("ファイル形式が不正です。");
       }
       const iterations = new DataView(buf, 6, 4).getUint32(0);
       const salt = bytes.slice(10, 26);
+      if (iterations !== check.iterations || !sameBytes(salt, fromBase64(check.salt))) {
+        throw new Error("暗号化ファイルと確認用ファイルが一致しません。管理者に連絡してください。");
+      }
       const iv = bytes.slice(26, 38);
       const data = bytes.slice(38);
-
-      const baseKey = await crypto.subtle.importKey(
-        "raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveKey"]);
-      const key = await crypto.subtle.deriveKey(
-        { name: "PBKDF2", salt, iterations, hash: "SHA-256" },
-        baseKey, { name: "AES-GCM", length: 256 }, false, ["decrypt"]);
       return crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, data);
     }
 
-    async function readWithProgress(res) {
-      // gzip 転送時は Content-Length が展開後サイズと一致しないため、その場合は受信量のみ表示する
-      const total = res.headers.get("Content-Encoding") ? 0 : Number(res.headers.get("Content-Length")) || 0;
+    async function readWithProgress(res, total) {
+      // GitHub Pages は gzip 転送するため Content-Length は使わず、確認用ファイルのサイズで進捗を出す
       if (!res.body) return res.arrayBuffer();
 
       const reader = res.body.getReader();
@@ -86,7 +109,7 @@
         chunks.push(value);
         received += value.length;
         setStatus(total
-          ? `ダウンロード中… ${Math.floor(received / total * 100)}%`
+          ? `ダウンロード中… ${Math.min(100, Math.floor(received / total * 100))}%`
           : `ダウンロード中… ${(received / 1048576).toFixed(1)} MB`);
       }
 
@@ -103,19 +126,24 @@
       e.preventDefault();
       submitBtn.disabled = true;
       guideEl.hidden = true;
-      setStatus("ダウンロード中…");
+      setStatus("パスワード確認中…");
       try {
+        const checkRes = await fetch(CHECK_FILE, { cache: "no-store" });
+        if (!checkRes.ok) throw new Error(`ファイルを取得できませんでした (${checkRes.status})`);
+        const check = await checkRes.json();
+        const key = await deriveCheckedKey(check, document.getElementById("password").value);
+
+        setStatus("ダウンロード中…");
         const res = await fetch(ENC_FILE, { cache: "no-store" });
         if (!res.ok) throw new Error(`ファイルを取得できませんでした (${res.status})`);
-        const buf = await readWithProgress(res);
+        const buf = await readWithProgress(res, check.size);
 
         setStatus("復号中…");
         let plain;
         try {
-          plain = await decrypt(buf, document.getElementById("password").value);
+          plain = await decrypt(buf, key, check);
         } catch (err) {
-          // AES-GCM はパスワード違いを認証エラー (OperationError) として返す
-          if (err.name === "OperationError") throw new Error("パスワードが違います。");
+          if (err.name === "OperationError") throw new Error("ファイルが破損しています。再度お試しください。");
           throw err;
         }
 
