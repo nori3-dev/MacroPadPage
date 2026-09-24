@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>APK Download</title>
+  <script>
+    // Android の User-Agent を判定
+    if (/Android/i.test(navigator.userAgent)) {
+      // APK のパス（GitHub Pages 上に置いたファイル）
+      window.location.href = "macropad.apk";
+    }
+  </script>
+</head>
+<body>
+  <h1>アプリのダウンロードページ</h1>
+  <p>Android 端末の場合は自動的に APK がダウンロードされます。</p>
+  <p>PC の場合は以下から手動でダウンロードできます：</p>
+  <a href="macropad.apk">APK をダウンロード</a>
+</body>
+</html>
