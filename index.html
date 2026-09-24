@@ -2,19 +2,94 @@
 <html lang="ja">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
   <title>APK Download</title>
-  <script>
-    // Android の User-Agent を判定
-    if (/Android/i.test(navigator.userAgent)) {
-      // APK のパス（GitHub Pages 上に置いたファイル）
-      window.location.href = "macropad.apk";
-    }
-  </script>
+  <style>
+    body { font-family: sans-serif; max-width: 480px; margin: 2rem auto; padding: 0 16px; }
+    input, button { font-size: 1rem; padding: .5rem; }
+    input { width: 100%; box-sizing: border-box; margin-bottom: .5rem; }
+    #status { margin-top: 1rem; }
+    .error { color: #c00; }
+  </style>
 </head>
 <body>
   <h1>アプリのダウンロードページ</h1>
-  <p>Android 端末の場合は自動的に APK がダウンロードされます。</p>
-  <p>PC の場合は以下から手動でダウンロードできます：</p>
-  <a href="macropad.apk">APK をダウンロード</a>
+  <p>パスワードを入力すると APK をダウンロードできます。</p>
+  <form id="form">
+    <input type="password" id="password" placeholder="パスワード" autocomplete="current-password" required>
+    <button type="submit" id="submit">ダウンロード</button>
+  </form>
+  <p id="status"></p>
+
+  <script>
+    // macropad.apk.enc の形式は encrypt-apk.mjs を参照
+    const ENC_FILE = "macropad.apk.enc";
+    const APK_NAME = "macropad.apk";
+    const MAGIC = "MPENC1";
+
+    const form = document.getElementById("form");
+    const statusEl = document.getElementById("status");
+    const submitBtn = document.getElementById("submit");
+
+    function setStatus(text, isError) {
+      statusEl.textContent = text;
+      statusEl.className = isError ? "error" : "";
+    }
+
+    async function decrypt(buf, password) {
+      const bytes = new Uint8Array(buf);
+      if (new TextDecoder().decode(bytes.slice(0, 6)) !== MAGIC) {
+        throw new Error("ファイル形式が不正です。");
+      }
+      const iterations = new DataView(buf, 6, 4).getUint32(0);
+      const salt = bytes.slice(10, 26);
+      const iv = bytes.slice(26, 38);
+      const data = bytes.slice(38);
+
+      const baseKey = await crypto.subtle.importKey(
+        "raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveKey"]);
+      const key = await crypto.subtle.deriveKey(
+        { name: "PBKDF2", salt, iterations, hash: "SHA-256" },
+        baseKey, { name: "AES-GCM", length: 256 }, false, ["decrypt"]);
+      return crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, data);
+    }
+
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      submitBtn.disabled = true;
+      setStatus("ダウンロード中…");
+      try {
+        const res = await fetch(ENC_FILE, { cache: "no-store" });
+        if (!res.ok) throw new Error(`ファイルを取得できませんでした (${res.status})`);
+        const buf = await res.arrayBuffer();
+
+        setStatus("復号中…");
+        let plain;
+        try {
+          plain = await decrypt(buf, document.getElementById("password").value);
+        } catch (err) {
+          // AES-GCM はパスワード違いを認証エラー (OperationError) として返す
+          if (err.name === "OperationError") throw new Error("パスワードが違います。");
+          throw err;
+        }
+
+        const blob = new Blob([plain], { type: "application/vnd.android.package-archive" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = APK_NAME;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 60000);
+        setStatus("ダウンロードを開始しました。");
+      } catch (err) {
+        setStatus(err.message, true);
+      } finally {
+        submitBtn.disabled = false;
+      }
+    });
+  </script>
 </body>
 </html>
