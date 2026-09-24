@@ -11,6 +11,8 @@
     input { width: 100%; box-sizing: border-box; margin-bottom: .5rem; }
     #status { margin-top: 1rem; }
     .error { color: #c00; }
+    .guide { background: #f4f6f8; border-radius: 8px; padding: .75rem 1rem; line-height: 1.6; }
+    .guide ol { margin: .5rem 0 0; padding-left: 1.5rem; }
   </style>
 </head>
 <body>
@@ -21,6 +23,19 @@
     <button type="submit" id="submit">ダウンロード</button>
   </form>
   <p id="status"></p>
+  <div id="guide-android" class="guide" hidden>
+    <strong>インストール手順</strong>
+    <ol>
+      <li>「有害な可能性があります」などの警告が出た場合は「ダウンロード」をタップ</li>
+      <li>画面下（または通知）に出る「開く」をタップ</li>
+      <li>初回のみ「この提供元のアプリを許可」をオンにして戻る</li>
+      <li>「インストール」をタップ</li>
+    </ol>
+    <p>「開く」を見逃した場合は、Chrome のメニュー →「ダウンロード」から <code>macropad.apk</code> をタップしてください。</p>
+  </div>
+  <div id="guide-pc" class="guide" hidden>
+    保存した <code>macropad.apk</code> を Android 端末にコピーし、端末のファイルアプリから開いてインストールしてください。
+  </div>
 
   <script>
     // macropad.apk.enc の形式は encrypt-apk.mjs を参照
@@ -31,6 +46,8 @@
     const form = document.getElementById("form");
     const statusEl = document.getElementById("status");
     const submitBtn = document.getElementById("submit");
+    const guideEl = document.getElementById(
+      /Android/i.test(navigator.userAgent) ? "guide-android" : "guide-pc");
 
     function setStatus(text, isError) {
       statusEl.textContent = text;
@@ -55,14 +72,42 @@
       return crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, data);
     }
 
+    async function readWithProgress(res) {
+      // gzip 転送時は Content-Length が展開後サイズと一致しないため、その場合は受信量のみ表示する
+      const total = res.headers.get("Content-Encoding") ? 0 : Number(res.headers.get("Content-Length")) || 0;
+      if (!res.body) return res.arrayBuffer();
+
+      const reader = res.body.getReader();
+      const chunks = [];
+      let received = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        received += value.length;
+        setStatus(total
+          ? `ダウンロード中… ${Math.floor(received / total * 100)}%`
+          : `ダウンロード中… ${(received / 1048576).toFixed(1)} MB`);
+      }
+
+      const bytes = new Uint8Array(received);
+      let offset = 0;
+      for (const chunk of chunks) {
+        bytes.set(chunk, offset);
+        offset += chunk.length;
+      }
+      return bytes.buffer;
+    }
+
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
       submitBtn.disabled = true;
+      guideEl.hidden = true;
       setStatus("ダウンロード中…");
       try {
         const res = await fetch(ENC_FILE, { cache: "no-store" });
         if (!res.ok) throw new Error(`ファイルを取得できませんでした (${res.status})`);
-        const buf = await res.arrayBuffer();
+        const buf = await readWithProgress(res);
 
         setStatus("復号中…");
         let plain;
@@ -83,7 +128,10 @@
         a.click();
         a.remove();
         setTimeout(() => URL.revokeObjectURL(url), 60000);
-        setStatus("ダウンロードを開始しました。");
+        // ブラウザが端末へ保存し終えたかはページから検知できないため、
+        // 取得・復号が済んで保存を渡した時点を完了とする
+        setStatus("ダウンロードが完了しました。");
+        guideEl.hidden = false;
       } catch (err) {
         setStatus(err.message, true);
       } finally {
